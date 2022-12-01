@@ -2,7 +2,7 @@
   description = "Flake utils demo";
 
   inputs.nixpkgs = {
-    url = "github:nixos/nixpkgs/17.09";
+    url = "github:nixos/nixpkgs/18.03";
     flake = false;
   };
 
@@ -35,7 +35,9 @@
             src = ./.;
             buildInputs = with pkgs; [pkgconfig readline nixUnstable boehmgc];
             buildPhase = ''
-              echo $NIX_CFLAGS_COMPILE $(pkg-config --cflags nix-main) | tr " " "\n" > $out
+              echo $NIX_CFLAGS_COMPILE $(pkg-config --cflags nix-main) \
+                -DNIX_VERSION=\"${(builtins.parseDrvName pkgs.nixUnstable.name).version}\" \
+                | tr " " "\n" > $out
             '';
             installPhase = ''
 

@@ -13,7 +13,7 @@
 #include <readline/readline.h>
 
 #include "affinity.hh"
-#include "common-opts.hh"
+#include "common-eval-args.hh"
 #include "derivations.hh"
 #include "eval-inline.hh"
 #include "eval.hh"
@@ -702,8 +702,8 @@ int main(int argc, char **argv) {
                      printHelp();
                      // exit with 0 since user asked for help
                      _exit(0);
-                   } else if (parseSearchPathArg(arg, end, searchPath))
-                     ;
+                   }
+                   //  else if (parseSearchPathArg(arg, end, searchPath));
                    else if (*arg != "" && arg->at(0) == '-')
                      return false;
                    else
