@@ -160,16 +160,12 @@ void NixRepl::mainLoop(const Strings &files) {
         // next line of input without clearing the input so far.
         continue;
       } else {
-        printMsg(lvlError, format(error + "%1%%2%") %
-                               (settings.showTrace ? e.prefix() : "") %
-                               e.msg());
+        printMsg(lvlError, e.msg());
       }
     } catch (Error &e) {
-      printMsg(lvlError, format(error + "%1%%2%") %
-                             (settings.showTrace ? e.prefix() : "") % e.msg());
+      printMsg(lvlError, e.msg());
     } catch (Interrupted &e) {
-      printMsg(lvlError, format(error + "%1%%2%") %
-                             (settings.showTrace ? e.prefix() : "") % e.msg());
+      printMsg(lvlError, e.msg());
     }
 
     // We handled the current input fully, so we should clear it and read brand
@@ -324,7 +320,8 @@ Path NixRepl::getDerivationPath(Value &v) {
         "expression does not evaluate to a derivation, so I can't build it");
   }
   Path drvPath = drvInfo->queryDrvPath();
-  if (drvPath == "" || !state.store->isValidPath(drvPath))
+  if (drvPath == "" ||
+      !state.store->isValidPath(state.store->parseStorePath(drvPath)))
     throw Error("expression did not evaluate to a valid derivation");
   return drvPath;
 }
@@ -402,18 +399,19 @@ bool NixRepl::processLine(string line) {
     Path drvPath = getDerivationPath(v);
 
     if (command == ":b") {
-      /* We could do the build in this process using buildPaths(),
-         but doing it in a child makes it easier to recover from
-         problems / SIGINT. */
-      if (runProgram("nix-store", Strings{"-r", drvPath}) == 0) {
-        Derivation drv = readDerivation(drvPath);
-        std::cout << std::endl
-                  << "this derivation produced the following outputs:"
-                  << std::endl;
-        for (auto &i : drv.outputs)
-          std::cout << format("  %1% -> %2%") % i.first % i.second.path
-                    << std::endl;
-      }
+      // /* We could do the build in this process using buildPaths(),
+      //    but doing it in a child makes it easier to recover from
+      //    problems / SIGINT. */
+      // if (runProgram(settings.nixBinDir + "/nix",
+      //                Strings{"build", "--no-link", drvPathRaw}) == 0) {
+      //   auto drv = state.store->readDerivation(drvPathRaw);
+      //   std::cout << std::endl
+      //             << "this derivation produced the following outputs:"
+      //             << std::endl;
+      //   for (auto &i : drv.outputsAndOptPaths(*state->store))
+      //     std::cout << fmt("  %s -> %s\n", i.first,
+      //                      state->store->printStorePath(*i.second.second));
+      // }
     } else if (command == ":i") {
       runProgram("nix-env", Strings{"-i", drvPath});
     } else {
@@ -431,7 +429,7 @@ bool NixRepl::processLine(string line) {
     return false;
 
   else if (command != "")
-    throw Error(format("unknown command ‘%1%’") % command);
+    throw Error("unknown command ‘%1%’", command);
 
   else {
     size_t p = line.find('=');

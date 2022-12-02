@@ -2,7 +2,7 @@
   description = "Flake utils demo";
 
   inputs.nixpkgs = {
-    url = "github:nixos/nixpkgs/19.09";
+    url = "github:nixos/nixpkgs/20.09";
     flake = false;
   };
 
@@ -19,7 +19,7 @@
           nix-repl = pkgs.stdenv.mkDerivation {
             name = "nix-repl";
             src = ./.;
-            buildInputs = with pkgs; [pkgconfig readline nixUnstable boehmgc boost];
+            buildInputs = with pkgs; [pkgconfig readline nixUnstable boehmgc boost nlohmann_json];
             buildPhase = ''
               mkdir -p $out/bin
               g++ -O3 -Wall -std=c++14 \
@@ -33,7 +33,7 @@
           compile_flags = pkgs.stdenv.mkDerivation {
             name = "nix-repl-src";
             src = ./.;
-            buildInputs = with pkgs; [pkgconfig readline nixUnstable boehmgc boost];
+            buildInputs = with pkgs; [pkgconfig readline nixUnstable boehmgc boost nlohmann_json];
             buildPhase = ''
               echo $NIX_CFLAGS_COMPILE $(pkg-config --cflags nix-main) \
                 -DNIX_VERSION=\"${(builtins.parseDrvName pkgs.nixUnstable.name).version}\" \
