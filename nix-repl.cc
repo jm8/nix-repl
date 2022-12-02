@@ -438,9 +438,7 @@ bool NixRepl::processLine(string line) {
         isVarName(name = removeWhitespace(string(line, 0, p)))) {
       Expr *e = parseString(string(line, p + 1));
       Value &v(*state.allocValue());
-      v.type = tThunk;
-      v.thunk.env = env;
-      v.thunk.expr = e;
+      v.mkThunk(env, e);
       addVarToScope(state.symbols.create(name), v);
     } else {
       Value v;
@@ -547,31 +545,31 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
 
   state.forceValue(v);
 
-  switch (v.type) {
+  switch (v.type()) {
 
-  case tInt:
+  case nInt:
     str << ESC_CYA << v.integer << ESC_END;
     break;
 
-  case tBool:
+  case nBool:
     str << ESC_CYA << (v.boolean ? "true" : "false") << ESC_END;
     break;
 
-  case tString:
+  case nString:
     str << ESC_YEL;
     printStringValue(str, v.string.s);
     str << ESC_END;
     break;
 
-  case tPath:
+  case nPath:
     str << ESC_GRE << v.path << ESC_END; // !!! escaping?
     break;
 
-  case tNull:
+  case nNull:
     str << ESC_CYA "null" ESC_END;
     break;
 
-  case tAttrs: {
+  case nAttrs: {
     seen.insert(&v);
 
     bool isDrv = state.isDerivation(v);
@@ -635,9 +633,7 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
     break;
   }
 
-  case tList1:
-  case tList2:
-  case tListN:
+  case nList:
     seen.insert(&v);
 
     str << "[ ";
@@ -658,19 +654,19 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
     str << "]";
     break;
 
-  case tLambda: {
-    std::ostringstream s;
-    s << v.lambda.fun->pos;
-    str << ESC_BLU "«lambda @ " << filterANSIEscapes(s.str()) << "»" ESC_END;
-    break;
-  }
-
-  case tPrimOp:
-    str << ESC_MAG "«primop»" ESC_END;
-    break;
-
-  case tPrimOpApp:
-    str << ESC_BLU "«primop-app»" ESC_END;
+  case nFunction:
+    if (v.isLambda()) {
+      std::ostringstream s;
+      s << v.lambda.fun->pos;
+      str << ANSI_BLUE "«lambda @ " << filterANSIEscapes(s.str())
+          << "»" ANSI_NORMAL;
+    } else if (v.isPrimOp()) {
+      str << ANSI_MAGENTA "«primop»" ANSI_NORMAL;
+    } else if (v.isPrimOpApp()) {
+      str << ANSI_BLUE "«primop-app»" ANSI_NORMAL;
+    } else {
+      abort();
+    }
     break;
 
   default:
