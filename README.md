@@ -8,7 +8,7 @@ currently runs on nixpkgs 22.11 (nix 2.11.0).
 the code doesn't have all the improvements made over the years to nix-repl but it compiles
 and is a standalone program.
 
-generate compile flags
+generate compile flags for clangd
 ```sh
 rm compile_flags.txt; nix build .#compile_flags -o compile_flags.txt
 ```
