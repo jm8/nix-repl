@@ -1,7 +1,3 @@
-#ifndef NIX_VERSION
-#define NIX_VERSION "nix"
-#endif
-
 #include <nix/config.h>
 
 #include <cstdlib>
@@ -711,8 +707,8 @@ int main(int argc, char **argv) {
                    return true;
                  });
 
-    NixRepl repl(searchPath, openStore());
-    repl.mainLoop(files);
+    auto repl = make_unique<NixRepl>(searchPath, openStore());
+    repl->mainLoop(files);
 
     write_history(historyFile.c_str());
   });

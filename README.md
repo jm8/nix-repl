@@ -3,7 +3,7 @@ this is just an experiment to see if I can get nix-repl compiling with the lates
 nowadays nix repl is inside Nix, but it would be super helpful to have an example
 program that uses the nix library in C++.
 
-currently runs on nixpkgs 18.03 (nix 2.0).
+currently runs on nixpkgs 18.09 (nix 2.1pre6377_954d1f4d).
 
 generate compile flags
 ```sh
