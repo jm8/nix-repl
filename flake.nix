@@ -2,7 +2,7 @@
   description = "Flake utils demo";
 
   inputs.nixpkgs = {
-    url = "github:nixos/nixpkgs/21.11";
+    url = "github:nixos/nixpkgs/22.11";
     flake = false;
   };
 
@@ -25,7 +25,7 @@
               g++ -O3 -Wall -std=c++14 \
                 -o $out/bin/nix-repl $src/nix-repl.cc \
                 $(pkg-config --cflags nix-main) \
-                 -lnixutil -lnixstore -lnixexpr -lnixmain -lreadline -lgc \
+                 -lnixutil -lnixstore -lnixexpr -lnixmain -lreadline -lnixcmd -lgc \
                 -DNIX_VERSION=\"${(builtins.parseDrvName pkgs.nixUnstable.name).version}\"
             '';
             installPhase = "true";

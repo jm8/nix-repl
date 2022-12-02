@@ -8,13 +8,13 @@
 #include <readline/history.h>
 #include <readline/readline.h>
 
-#include "affinity.hh"
 #include "common-eval-args.hh"
 #include "derivations.hh"
 #include "eval-inline.hh"
 #include "eval.hh"
 #include "get-drvs.hh"
 #include "globals.hh"
+#include "local-fs-store.hh"
 #include "shared.hh"
 #include "store-api.hh"
 
@@ -48,7 +48,7 @@ struct NixRepl
   Strings loadedFiles;
 
   const static int envSize = 32768;
-  StaticEnv staticEnv;
+  std::shared_ptr<StaticEnv> staticEnv;
   Env *env;
   int displ;
   StringSet varNames;
@@ -60,7 +60,7 @@ struct NixRepl
   void mainLoop(const Strings &files);
   void completePrefix(string prefix);
   bool getLine(string &input, const char *prompt);
-  Path getDerivationPath(Value &v);
+  StorePath getDerivationPath(Value &v);
   bool processLine(string line);
   void loadFile(const Path &path);
   void initEnv();
@@ -128,7 +128,7 @@ string removeWhitespace(string s) {
 
 NixRepl::NixRepl(const Strings &searchPath, nix::ref<Store> store)
     : state(std::make_unique<EvalState>(searchPath, store)),
-      staticEnv(false, &state->staticBaseEnv) {
+      staticEnv(new StaticEnv(false, state->staticBaseEnv.get())) {
   curDir = absPath(".");
 }
 
@@ -271,10 +271,10 @@ void NixRepl::completePrefix(string prefix) {
       Expr *e = parseString(expr);
       Value v;
       e->eval(*state, *env, v);
-      state->forceAttrs(v);
+      state->forceAttrs(v, noPos);
 
       for (auto &i : *v.attrs) {
-        string name = i.name;
+        string_view name = state->symbols[i.name];
         if (string(name, 0, prefix2.size()) != prefix2)
           continue;
         completions.insert(expr + "." + name);
@@ -290,24 +290,19 @@ void NixRepl::completePrefix(string prefix) {
   }
 }
 
-static int runProgram(const string &program, const Strings &args) {
-  std::vector<const char *> cargs; /* careful with c_str()! */
-  cargs.push_back(program.c_str());
-  for (Strings::const_iterator i = args.begin(); i != args.end(); ++i)
-    cargs.push_back(i->c_str());
-  cargs.push_back(0);
+void runNix(Path program, const Strings &args,
+            const std::optional<std::string> &input = {}) {
+  auto subprocessEnv = getEnv();
+  subprocessEnv["NIX_CONFIG"] = globalConfig.toKeyValue();
 
-  Pid pid;
-  pid = fork();
-  if (pid == -1)
-    throw SysError("forking");
-  if (pid == 0) {
-    restoreAffinity();
-    execvp(program.c_str(), (char **)&cargs[0]);
-    _exit(1);
-  }
+  runProgram2(RunOptions{
+      .program = settings.nixBinDir + "/" + program,
+      .args = args,
+      .environment = subprocessEnv,
+      .input = input,
+  });
 
-  return pid.wait();
+  return;
 }
 
 bool isVarName(const string &s) {
@@ -323,17 +318,19 @@ bool isVarName(const string &s) {
   return true;
 }
 
-Path NixRepl::getDerivationPath(Value &v) {
+StorePath NixRepl::getDerivationPath(Value &v) {
   auto drvInfo = getDerivation(*state, v, false);
-  if (!drvInfo) {
+  if (!drvInfo)
     throw Error(
         "expression does not evaluate to a derivation, so I can't build it");
-  }
-  Path drvPath = drvInfo->queryDrvPath();
-  if (drvPath == "" ||
-      !state->store->isValidPath(state->store->parseStorePath(drvPath)))
-    throw Error("expression did not evaluate to a valid derivation");
-  return drvPath;
+  auto drvPath = drvInfo->queryDrvPath();
+  if (!drvPath)
+    throw Error("expression did not evaluate to a valid derivation (no "
+                "'drvPath' attribute)");
+  if (!state->store->isValidPath(*drvPath))
+    throw Error("expression evaluated to invalid derivation '%s'",
+                state->store->printStorePath(*drvPath));
+  return *drvPath;
 }
 
 bool NixRepl::processLine(string line) {
@@ -397,35 +394,39 @@ bool NixRepl::processLine(string line) {
     evalString("drv: (import <nixpkgs> {}).runCommand \"shell\" { buildInputs "
                "= [ drv ]; } \"\"",
                f);
-    state->callFunction(f, v, result, Pos());
+    state->callFunction(f, v, result, PosIdx());
 
-    Path drvPath = getDerivationPath(result);
-    runProgram("nix-shell", Strings{drvPath});
+    StorePath drvPath = getDerivationPath(result);
+    runNix("nix-shell", Strings{state->store->printStorePath(drvPath)});
   }
 
   else if (command == ":b" || command == ":i" || command == ":s") {
     Value v;
     evalString(arg, v);
-    Path drvPath = getDerivationPath(v);
+    StorePath drvPath = getDerivationPath(v);
+    Path drvPathRaw = state->store->printStorePath(drvPath);
 
     if (command == ":b") {
-      // /* We could do the build in this process using buildPaths(),
-      //    but doing it in a child makes it easier to recover from
-      //    problems / SIGINT. */
-      // if (runProgram(settings.nixBinDir + "/nix",
-      //                Strings{"build", "--no-link", drvPathRaw}) == 0) {
-      //   auto drv = state->store->readDerivation(drvPathRaw);
-      //   std::cout << std::endl
-      //             << "this derivation produced the following outputs:"
-      //             << std::endl;
-      //   for (auto &i : drv.outputsAndOptPaths(*state->store))
-      //     std::cout << fmt("  %s -> %s\n", i.first,
-      //                      state->store->printStorePath(*i.second.second));
-      // }
+      state->store->buildPaths({DerivedPath::Built{drvPath}});
+      auto drv = state->store->readDerivation(drvPath);
+      logger->cout("\nThis derivation produced the following outputs:");
+      for (auto &[outputName, outputPath] :
+           state->store->queryDerivationOutputMap(drvPath)) {
+        auto localStore = state->store.dynamic_pointer_cast<LocalFSStore>();
+        if (localStore && command == ":bl") {
+          std::string symlink = "repl-result-" + outputName;
+          localStore->addPermRoot(outputPath, absPath(symlink));
+          logger->cout("  ./%s -> %s", symlink,
+                       state->store->printStorePath(outputPath));
+        } else {
+          logger->cout("  %s -> %s", outputName,
+                       state->store->printStorePath(outputPath));
+        }
+      }
     } else if (command == ":i") {
-      runProgram("nix-env", Strings{"-i", drvPath});
+      runNix("nix-env", {"-i", drvPathRaw});
     } else {
-      runProgram("nix-shell", Strings{drvPath});
+      runNix("nix-shell", {drvPathRaw});
     }
   }
 
@@ -474,11 +475,11 @@ void NixRepl::initEnv() {
   env = &state->allocEnv(envSize);
   env->up = &state->baseEnv;
   displ = 0;
-  staticEnv.vars.clear();
+  staticEnv->vars.clear();
 
   varNames.clear();
-  for (auto &i : state->staticBaseEnv.vars)
-    varNames.insert(i.first);
+  for (auto &i : state->staticBaseEnv->vars)
+    varNames.emplace(state->symbols[i.first]);
 }
 
 void NixRepl::reloadFiles() {
@@ -498,7 +499,7 @@ void NixRepl::reloadFiles() {
 }
 
 void NixRepl::addAttrsToScope(Value &attrs) {
-  state->forceAttrs(attrs);
+  state->forceAttrs(attrs, [&]() { return attrs.determinePos(noPos); });
   for (auto &i : *attrs.attrs)
     addVarToScope(i.name, *i.value);
   std::cout << format("Added %1% variables.") % attrs.attrs->size()
@@ -508,9 +509,10 @@ void NixRepl::addAttrsToScope(Value &attrs) {
 void NixRepl::addVarToScope(const Symbol &name, Value &v) {
   if (displ >= envSize)
     throw Error("environment full; cannot add more variables");
-  staticEnv.vars.emplace_back(name, displ);
+  staticEnv->vars.emplace_back(name, displ);
+  staticEnv->sort();
   env->values[displ++] = &v;
-  varNames.insert((string)name);
+  varNames.insert(state->symbols[name]);
 }
 
 Expr *NixRepl::parseString(string s) {
@@ -521,7 +523,7 @@ Expr *NixRepl::parseString(string s) {
 void NixRepl::evalString(string s, Value &v) {
   Expr *e = parseString(s);
   e->eval(*state, *env, v);
-  state->forceValue(v);
+  state->forceValue(v, [&]() { return v.determinePos(noPos); });
 }
 
 std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
@@ -553,7 +555,7 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
   str.flush();
   checkInterrupt();
 
-  state->forceValue(v);
+  state->forceValue(v, [&]() { return v.determinePos(noPos); });
 
   switch (v.type()) {
 
@@ -589,7 +591,7 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
       Bindings::iterator i = v.attrs->find(state->sDrvPath);
       PathSet context;
       Path drvPath = i != v.attrs->end()
-                         ? state->coerceToPath(*i->pos, *i->value, context)
+                         ? state->coerceToPath(i->pos, *i->value, context)
                          : "???";
       str << drvPath << "»";
     }
@@ -600,22 +602,7 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
       typedef std::map<string, Value *> Sorted;
       Sorted sorted;
       for (auto &i : *v.attrs)
-        sorted[i.name] = i.value;
-
-      /* If this is a derivation, then don't show the
-         self-references ("all", "out", etc.). */
-      StringSet hidden;
-      if (isDrv) {
-        hidden.insert("all");
-        Bindings::iterator i = v.attrs->find(state->sOutputs);
-        if (i == v.attrs->end())
-          hidden.insert("out");
-        else {
-          state->forceList(*i->value);
-          for (unsigned int j = 0; j < i->value->listSize(); ++j)
-            hidden.insert(state->forceStringNoCtx(*i->value->listElems()[j]));
-        }
-      }
+        sorted.emplace(state->symbols[i.name], i.value);
 
       for (auto &i : sorted) {
         if (isVarName(i.first))
@@ -623,9 +610,7 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
         else
           printStringValue(str, i.first.c_str());
         str << " = ";
-        if (hidden.find(i.first) != hidden.end())
-          str << "«...»";
-        else if (seen.find(i.second) != seen.end())
+        if (seen.find(i.second) != seen.end())
           str << "«repeated»";
         else
           try {
@@ -667,7 +652,7 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
   case nFunction:
     if (v.isLambda()) {
       std::ostringstream s;
-      s << v.lambda.fun->pos;
+      s << state->positions[v.lambda.fun->pos];
       str << ANSI_BLUE "«lambda @ " << filterANSIEscapes(s.str())
           << "»" ANSI_NORMAL;
     } else if (v.isPrimOp()) {
