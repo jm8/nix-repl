@@ -2,7 +2,7 @@
   description = "Flake utils demo";
 
   inputs.nixpkgs = {
-    url = "github:nixos/nixpkgs/18.09";
+    url = "github:nixos/nixpkgs/19.03";
     flake = false;
   };
 
