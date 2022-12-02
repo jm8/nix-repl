@@ -498,7 +498,7 @@ void NixRepl::addAttrsToScope(Value &attrs) {
 void NixRepl::addVarToScope(const Symbol &name, Value &v) {
   if (displ >= envSize)
     throw Error("environment full; cannot add more variables");
-  staticEnv.vars[name] = displ;
+  staticEnv.vars.emplace_back(name, displ);
   env->values[displ++] = &v;
   varNames.insert((string)name);
 }
