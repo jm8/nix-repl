@@ -18,6 +18,11 @@
 #include "shared.hh"
 #include "store-api.hh"
 
+#if HAVE_BOEHMGC
+#define GC_INCLUDE_NEW
+#include <gc/gc_cpp.h>
+#endif
+
 using namespace std;
 using namespace nix;
 
@@ -32,9 +37,13 @@ using namespace nix;
 string programId = "nix-repl";
 const string historyFile = string(getenv("HOME")) + "/.nix-repl-history";
 
-struct NixRepl {
+struct NixRepl
+#if HAVE_BOEHMGC
+    : gc
+#endif
+{
   string curDir;
-  EvalState state;
+  std::unique_ptr<EvalState> state;
 
   Strings loadedFiles;
 
@@ -118,7 +127,8 @@ string removeWhitespace(string s) {
 }
 
 NixRepl::NixRepl(const Strings &searchPath, nix::ref<Store> store)
-    : state(searchPath, store), staticEnv(false, &state.staticBaseEnv) {
+    : state(std::make_unique<EvalState>(searchPath, store)),
+      staticEnv(false, &state->staticBaseEnv) {
   curDir = absPath(".");
 }
 
@@ -260,8 +270,8 @@ void NixRepl::completePrefix(string prefix) {
 
       Expr *e = parseString(expr);
       Value v;
-      e->eval(state, *env, v);
-      state.forceAttrs(v);
+      e->eval(*state, *env, v);
+      state->forceAttrs(v);
 
       for (auto &i : *v.attrs) {
         string name = i.name;
@@ -314,14 +324,14 @@ bool isVarName(const string &s) {
 }
 
 Path NixRepl::getDerivationPath(Value &v) {
-  auto drvInfo = getDerivation(state, v, false);
+  auto drvInfo = getDerivation(*state, v, false);
   if (!drvInfo) {
     throw Error(
         "expression does not evaluate to a derivation, so I can't build it");
   }
   Path drvPath = drvInfo->queryDrvPath();
   if (drvPath == "" ||
-      !state.store->isValidPath(state.store->parseStorePath(drvPath)))
+      !state->store->isValidPath(state->store->parseStorePath(drvPath)))
     throw Error("expression did not evaluate to a valid derivation");
   return drvPath;
 }
@@ -367,12 +377,12 @@ bool NixRepl::processLine(string line) {
   }
 
   else if (command == ":l" || command == ":load") {
-    state.resetFileCache();
+    state->resetFileCache();
     loadFile(arg);
   }
 
   else if (command == ":r" || command == ":reload") {
-    state.resetFileCache();
+    state->resetFileCache();
     reloadFiles();
   }
 
@@ -387,7 +397,7 @@ bool NixRepl::processLine(string line) {
     evalString("drv: (import <nixpkgs> {}).runCommand \"shell\" { buildInputs "
                "= [ drv ]; } \"\"",
                f);
-    state.callFunction(f, v, result, Pos());
+    state->callFunction(f, v, result, Pos());
 
     Path drvPath = getDerivationPath(result);
     runProgram("nix-shell", Strings{drvPath});
@@ -404,7 +414,7 @@ bool NixRepl::processLine(string line) {
       //    problems / SIGINT. */
       // if (runProgram(settings.nixBinDir + "/nix",
       //                Strings{"build", "--no-link", drvPathRaw}) == 0) {
-      //   auto drv = state.store->readDerivation(drvPathRaw);
+      //   auto drv = state->store->readDerivation(drvPathRaw);
       //   std::cout << std::endl
       //             << "this derivation produced the following outputs:"
       //             << std::endl;
@@ -437,9 +447,9 @@ bool NixRepl::processLine(string line) {
     if (p != string::npos && p < line.size() && line[p + 1] != '=' &&
         isVarName(name = removeWhitespace(string(line, 0, p)))) {
       Expr *e = parseString(string(line, p + 1));
-      Value &v(*state.allocValue());
+      Value &v(*state->allocValue());
       v.mkThunk(env, e);
-      addVarToScope(state.symbols.create(name), v);
+      addVarToScope(state->symbols.create(name), v);
     } else {
       Value v;
       evalString(line, v);
@@ -454,20 +464,20 @@ void NixRepl::loadFile(const Path &path) {
   loadedFiles.remove(path);
   loadedFiles.push_back(path);
   Value v, v2;
-  state.evalFile(lookupFileArg(state, path), v);
-  Bindings &bindings(*state.allocBindings(0));
-  state.autoCallFunction(bindings, v, v2);
+  state->evalFile(lookupFileArg(*state, path), v);
+  Bindings &bindings(*state->allocBindings(0));
+  state->autoCallFunction(bindings, v, v2);
   addAttrsToScope(v2);
 }
 
 void NixRepl::initEnv() {
-  env = &state.allocEnv(envSize);
-  env->up = &state.baseEnv;
+  env = &state->allocEnv(envSize);
+  env->up = &state->baseEnv;
   displ = 0;
   staticEnv.vars.clear();
 
   varNames.clear();
-  for (auto &i : state.staticBaseEnv.vars)
+  for (auto &i : state->staticBaseEnv.vars)
     varNames.insert(i.first);
 }
 
@@ -488,7 +498,7 @@ void NixRepl::reloadFiles() {
 }
 
 void NixRepl::addAttrsToScope(Value &attrs) {
-  state.forceAttrs(attrs);
+  state->forceAttrs(attrs);
   for (auto &i : *attrs.attrs)
     addVarToScope(i.name, *i.value);
   std::cout << format("Added %1% variables.") % attrs.attrs->size()
@@ -504,14 +514,14 @@ void NixRepl::addVarToScope(const Symbol &name, Value &v) {
 }
 
 Expr *NixRepl::parseString(string s) {
-  Expr *e = state.parseExprFromString(s, curDir, staticEnv);
+  Expr *e = state->parseExprFromString(s, curDir, staticEnv);
   return e;
 }
 
 void NixRepl::evalString(string s, Value &v) {
   Expr *e = parseString(s);
-  e->eval(state, *env, v);
-  state.forceValue(v);
+  e->eval(*state, *env, v);
+  state->forceValue(v);
 }
 
 std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
@@ -543,7 +553,7 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
   str.flush();
   checkInterrupt();
 
-  state.forceValue(v);
+  state->forceValue(v);
 
   switch (v.type()) {
 
@@ -572,14 +582,14 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
   case nAttrs: {
     seen.insert(&v);
 
-    bool isDrv = state.isDerivation(v);
+    bool isDrv = state->isDerivation(v);
 
     if (isDrv) {
       str << "«derivation ";
-      Bindings::iterator i = v.attrs->find(state.sDrvPath);
+      Bindings::iterator i = v.attrs->find(state->sDrvPath);
       PathSet context;
       Path drvPath = i != v.attrs->end()
-                         ? state.coerceToPath(*i->pos, *i->value, context)
+                         ? state->coerceToPath(*i->pos, *i->value, context)
                          : "???";
       str << drvPath << "»";
     }
@@ -597,13 +607,13 @@ std::ostream &NixRepl::printValue(std::ostream &str, Value &v,
       StringSet hidden;
       if (isDrv) {
         hidden.insert("all");
-        Bindings::iterator i = v.attrs->find(state.sOutputs);
+        Bindings::iterator i = v.attrs->find(state->sOutputs);
         if (i == v.attrs->end())
           hidden.insert("out");
         else {
-          state.forceList(*i->value);
+          state->forceList(*i->value);
           for (unsigned int j = 0; j < i->value->listSize(); ++j)
-            hidden.insert(state.forceStringNoCtx(*i->value->listElems()[j]));
+            hidden.insert(state->forceStringNoCtx(*i->value->listElems()[j]));
         }
       }
 
